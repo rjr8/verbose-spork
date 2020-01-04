@@ -30,7 +30,7 @@ well_data <-
   mutate(
     date_time = as.POSIXct(date_time, tz="EST", "%m/%d/%y %H:%M")
   ) %>%
-  filter(date_time >= as.POSIXct("2016-04-25 00:00:00")) #it looks like the water levels are                      equibilrating at the beginning of the record for a few wells so lets trim the beginning of the           dataset to eliminate those records
+  filter(date_time >= as.POSIXct("2016-04-25 00:00:00")) #it looks like the water levels are                      equibilrating at the beginning of the record for a few wells so lets trim the beginning of the dataset to eliminate those records
 
 ```
 
@@ -53,8 +53,8 @@ tidal_data <-
     water_level = Water.Level
   ) %>%
   mutate(
-    date_time = as.POSIXct(date_time, tz="EST", "%m/%d/%y %H:%M"), #changes date_time column from a                   factor to a date
-    date_time_15min = cut(date_time, breaks="15 min") #takes each time step and bins it into a 15 minute              interval
+    date_time = as.POSIXct(date_time, tz="EST", "%m/%d/%y %H:%M"), #changes date_time column from a factor to a date
+    date_time_15min = cut(date_time, breaks="15 min") #takes each time step and bins it into a 15 minute interval
   ) %>%
   group_by(date_time_15min) %>%
   summarise(
@@ -76,7 +76,7 @@ tidal_data <-
 
 ## Explore the well water level data
 
-Before we summarize data lets look at the distribution, and eliminate any biased or suspect data
+Before summarizing data look at the distribution and eliminate any biased or suspect data
 
 ```{r Well water level distribution}
 
