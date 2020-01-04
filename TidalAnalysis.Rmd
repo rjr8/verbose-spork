@@ -1,0 +1,431 @@
+---
+title: "TidalAnalysis"
+author: "Rob Rossi"
+date: "12/31/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("tidyverse")
+library("purrr")
+library("ggpubr")
+
+#set machine tz to EST to correctly convert dates
+Sys.setenv(TZ="EST")
+
+#Only print 3 decimal places
+options(digits=3)
+```
+
+## Read in data
+
+```{r Read data}
+
+raw_tidal_data <- read.table(file = "RawTidalData.csv", sep=",", header=TRUE)
+
+well_data <- 
+  read.table(file = "WellData_intfill.csv", sep=",", header=TRUE) %>%
+  mutate(
+    date_time = as.POSIXct(date_time, tz="EST", "%m/%d/%y %H:%M")
+  ) %>%
+  filter(date_time >= as.POSIXct("2016-04-25 00:00:00")) #it looks like the water levels are                      equibilrating at the beginning of the record for a few wells so lets trim the beginning of the           dataset to eliminate those records
+
+```
+
+
+
+## Process the tidal data
+
+NOAA tidal data is recorded at 6 minute intervals. However, our water level loggers record the water level at 15 minute intervals. This chunk of code takes the NOAA data, averages it over 15 minute intervals, and generates a new dataset that we can use for our time series analyses.
+
+```{r Tidal data}
+
+# check to see if there are any unverified data
+any(raw_tidal_data$Quality!= "v")
+
+# Cool, there are no unverified data, now lets clean up the data a little, aggregate it by 15 minute intervals, and remove all the extraneous info
+tidal_data <-
+  raw_tidal_data %>%
+  rename(
+    date_time = Date.Time,
+    water_level = Water.Level
+  ) %>%
+  mutate(
+    date_time = as.POSIXct(date_time, tz="EST", "%m/%d/%y %H:%M"), #changes date_time column from a                   factor to a date
+    date_time_15min = cut(date_time, breaks="15 min") #takes each time step and bins it into a 15 minute              interval
+  ) %>%
+  group_by(date_time_15min) %>%
+  summarise(
+    water_level_15min = mean(water_level)
+  ) %>%
+  select(
+    date_time_15min,
+    water_level_15min
+  ) %>%
+  mutate(
+    date_time_15min = as.POSIXct(date_time_15min, tz="EST", "%Y-%m-%d %H:%M")
+  ) %>%
+  rename(
+    date_time = date_time_15min,
+    tide_water_level = water_level_15min
+  )
+
+```
+
+## Explore the well water level data
+
+Before we summarize data lets look at the distribution, and eliminate any biased or suspect data
+
+```{r Well water level distribution}
+
+#First let's tidy the well data to simplify plotting and summarizing it.
+
+tidy_well_data <-
+  well_data %>%
+  gather( 
+    key = "well",
+    value = "water_level",
+    na.rm = TRUE,
+    MW1,
+    MW2,
+    MW3,
+    MW4,
+    MW5,
+    MW6,
+    MW7) 
+
+tidy_well_data %>%
+  ggplot(
+    aes(x=water_level, 
+        fill=well, 
+        color=well)
+    ) + 
+  geom_histogram(
+    position="identity",
+    binwidth=0.1) +
+  labs(y = "count", x = "water level (m)") +
+  theme_classic()
+
+
+tidy_well_data %>%
+  ggplot(
+    aes(sample = water_level)) +
+  geom_qq_line() +
+  geom_qq(
+    aes(colour=well)) + 
+  facet_wrap( ~ well,
+              ncol=3,
+              scales = "free_y") +
+  labs(title = "quantile-quantile plots") +
+  theme_classic()
+
+```
+
+From the histograms the wells more or less look like they are normally distributed (except for MW6, and MW5), but the qqplots tell a different story. However since this study doesn't really focus on differences in the well water levels, summarizing the data with the mean isn't too terrible.
+
+MW6 does look weird though, both in it's distribution and the well water level. This warrants further scrutiny. After examining historical maps it looks like MW6 is drilled into 19th century glass works, which means the data from this well isn't representative of the natural groundwater, and we can eliminate it from further analysis. Now let's summarize the seasonal and annual water level for each well.
+
+```{r Summarize well water levels}
+#Make a list of the equinoxes and solstices. Use 2016 since it was a leap year, and to simplfy I'm ignoring that the solostices and equinoxes move.
+
+WS <- as.Date("2016-12-21", format = "%Y-%m-%d") # Winter Solstice
+SE <- as.Date("2016-3-20",  format = "%Y-%m-%d") # Spring Equinox
+SS <- as.Date("2016-6-20",  format = "%Y-%m-%d") # Summer Solstice
+FE <- as.Date("2016-9-22",  format = "%Y-%m-%d") # Fall Equinox
+
+well_data %>%
+  mutate(
+    date_time = as.POSIXct(date_time, tz="EST", "%m/%d/%y %H:%M"),
+    date = as.Date(strftime(date_time, format="2016-%m-%d"))
+  ) %>%
+  mutate(
+    season = case_when(
+      date >= SE & date < SS ~ "spring",
+      date >= SS & date < FE ~ "summer",
+      date >= FE & date < WS ~ "fall",
+      TRUE                   ~ "winter")
+  ) %>%
+  gather( 
+    key = "well",
+    value = "water_level",
+    na.rm = TRUE,
+    MW1,
+    MW2,
+    MW3,
+    MW4,
+    MW5,
+    MW7) %>%
+  select(
+    season,
+    well,
+    water_level
+  ) %>%
+  group_by(well, season) %>%
+  summarise(
+    average = mean(water_level)
+  ) %>%
+  spread(season, average) %>%
+  mutate_if(is.numeric, ~round(., 2))
+
+#summarize the annual water levels
+tidy_well_data %>%
+  filter(well != "MW6") %>%
+  group_by(well) %>%
+  summarise(
+    average = mean(water_level)
+  ) %>%
+  spread(well, average) %>%
+  mutate_if(is.numeric, ~round(., 2))
+
+```
+
+## Combine the tidal and well data
+
+Seeing as all the wells are in the same region, we'd expect trends in the water levels to be the same. Lets plot a snippet of the data and see if there are any wells that do not have tidal signals. 
+
+
+Now that the tidal data is aggregated into 15 minute intervals we can combine it with the water level data in the monitoring wells.
+
+```{r Join well and tidal data}
+
+combined_data <-
+  well_data %>%
+  select(-ends_with("6")) %>% #eliminate MW6
+  left_join(tidal_data, by = "date_time")
+
+# a tidy version 
+tidy_combined_data <-
+  tidy_well_data %>%
+  select(-ends_with("6")) %>% #eliminate MW6
+  left_join(tidal_data, by = "date_time")
+
+```
+
+
+## Identify which wells have tidal signals
+
+To save analysis work, plot a week's worth of well water levels to see if there are any wells without a tidal signal.
+
+```{r Visualize subset of well data}
+
+tidy_well_data %>%
+  filter(well != "MW6") %>%
+  filter(date_time >= as.POSIXct("2017-03-23 00:00:00") & 
+         date_time <= as.POSIXct("2017-03-30 00:00:00")
+         ) %>%
+  ggplot(
+    aes(x = date_time, 
+        y = water_level,
+        color = well)) +
+  geom_line() + 
+  facet_wrap( ~ well, 
+              scales = "free_y",
+              nrow=3) + 
+  labs(x = "",
+       y = "water level (masl)") + theme_classic()
+
+```
+
+Looks like only MW1, MW2, MW3, and MW4 have tidal signals. Water levels in MW5 and MW7 are pretty static (+ 0.4 and 0.015 over 4 days, respectively).
+
+## Cross correlation analysis
+
+Use cross correlation analysis to determine the lag time between tidal oscillations in the wells and the river water.
+
+```{r Lag times}
+
+well_lags <-
+  tidy_combined_data %>%
+  
+  split(.$well) %>%
+  map(~ccf(.$water_level, 
+           .$tide_water_level, 
+           plot = F,
+           na.action = na.pass)
+      ) %>%
+  map_dfr(
+      ~data.frame(lag = .$lag, 
+                  acf = .$acf
+            ), 
+      .id = "well") %>%
+  filter(lag >= 0 & lag <= 40) %>% #lags less than 0 are correlations where the well water level leads the tidal water level, 
+  group_by(well) %>%
+  summarise(
+    lag_time = lag[which.max(acf)]*15 #this converts the lags from timesteps to minutes
+  )
+
+```
+
+## Create periodograms
+
+```{r}
+
+#establish sampling interval (makes x axis be in minutes)
+del<-0.02/750
+f=del/60
+
+# determine oscillation periods
+spectral_data <-
+  tidy_combined_data %>%
+  filter(well != "MW6") %>%
+  split(.$well) %>%
+  map(~spectrum(.$water_level,
+                log="no",
+                span=5,
+                plot = F,
+                na.action = na.pass)
+      ) %>%
+  map_dfr(
+      ~data.frame(freq = .$freq, 
+                  spec = .$spec
+            ), 
+      .id = "well") %>%
+  group_by(well) %>%
+  mutate(frequency_min = freq/del,
+         density = 2*spec
+  )
+
+#plot the periodograms
+
+spectral_data %>%
+  ggplot(
+    aes(x = frequency_min, 
+        y = density,
+        color = well)) +
+  geom_line() + 
+  ylim(0,2) + xlim(0,1000) +
+  facet_wrap( ~ well,
+              nrow=6) +
+  theme_classic() + labs(x = "frequency (min)")
+
+#eyeballing the plots suggests the major tidal signals are ~ 750, which is roughly 12 hrs. This is the M2 lunar semi-diurnal constituent that is present in tides. There also is a signal at ~ 6 hrs present in most wells, but it's unclear what this signal is. Signals < 250 min are likely noise cause by the data logging interval.
+
+
+#extract the periods of these major signals
+
+period <- 
+  spectral_data %>%
+  filter(well != "MW5" & well != "MW7") %>% #no tidal signal in these wells
+  filter(frequency_min >= 650 & frequency_min <= 800) %>%
+  group_by(well) %>%
+  summarise(to = frequency_min[which.max(density)])
+
+```
+
+## Hydraulic conductivity calculations
+
+```{r Calculate k with Jacob–Ferris tidal method}
+
+well <- c("MW1", "MW2", "MW3", "MW4")
+aquifer_compressibility <- c(10^-7,10^-7,10^-7,10^-8) # Values taken from Freeze and                                                                             Cherry 1979
+aquifer_porosity <- c(0.46, 0.43, 0.43, 0.28) # Values taken from Fetter 2001
+shoreline_distance <- c(480, 392, 304, 210) # Determined via google earth
+slug_k <- c(0.00168598, 0.002004609, 0.001646273, 8.83133E-05) #calculated by field testing
+
+tidal_calcs_data <- 
+  data.frame(well,
+             aquifer_compressibility,
+             aquifer_porosity,
+             shoreline_distance,
+             slug_k) %>%
+  left_join(well_lags, by = "well") %>%
+  left_join(period, by = "well")
+                               
+tidal_calcs_data <-
+  tidal_calcs_data %>%
+  mutate(tidal_effic = aquifer_compressibility/(aquifer_compressibility + aquifer_porosity*4.67e-10 )
+            ) %>% #calulate true tidal efficiency
+  mutate(spec_stor = (aquifer_porosity*4.67e-10*9.8e3)/(1-tidal_effic)
+         ) %>% #calculate specific storage
+  mutate(tidal_k = (spec_stor*to*shoreline_distance^2)/(4*pi*lag_time^2)*(1/60)
+         ) #calculate k using tidal diffusivity method
+
+```
+
+Now test if the k determined by field tests (slug_k) and the k calculated by the Jacob–Ferris tidal method is different
+
+
+```{r Statistical hypothesis testing}
+
+  t.test(x = tidal_calcs_data$tidal_k,
+         y= tidal_calcs_data$slug_k,
+         paired = FALSE,
+         var.equal = FALSE) #use welch's t-test 
+
+```
+
+there is no statistically significant difference between the k's detrmined via the two methods.
+
+## Fast Fourier transforms
+
+Use fft to determine the amplitude and phase of tidal oscillations in each well
+
+```{r Fast Fourier Transforms}
+
+#Fast Fourier Transform to get amplitude and phase for each well
+
+time <- 824/1.9322 
+
+any(is.na(tidy_well_data)) #there are no NAs in the data, we can proceed with the fft
+
+fft_data <-
+  tidy_well_data %>%
+  filter(well != "MW5" & 
+         well != "MW6" &
+         well != "MW7") %>% #no tidal signal in these wells, so no reason to fft
+  split(.$well) %>%
+  map(~fft(.$water_level)
+      ) %>%
+  map_dfr(
+      ~data.frame(mag = Mod(.), 
+                  phase = Arg(.)
+            ), 
+      .id = "well") %>%
+  group_by(well) %>%
+  mutate(amp = mag/length(mag)) %>%
+  group_by(well) %>%
+  summarise(max_amp = max(amp[770:870]),
+            max_phase = phase[amp == max_amp])
+
+#Plot phase and amplitude against distance from the shore
+
+amp_plot <-
+  tidal_calcs_data %>%
+  select(well,
+         shoreline_distance) %>%
+  left_join(fft_data, by = "well") %>%
+  ggplot(
+    aes(x = shoreline_distance, 
+        y = max_amp,
+        color = well)) +
+  geom_point(size = 3) + 
+  ylim(0,0.02) + xlim(200,500) + 
+  labs(x = "Distance from shore (m)",
+       y = "Amplitude (m)") +
+  theme_classic() + theme(aspect.ratio=1)
+
+phase_plot <-
+  tidal_calcs_data %>%
+  select(well,
+         shoreline_distance) %>%
+  left_join(fft_data, by = "well") %>%
+  ggplot(
+    aes(x = shoreline_distance, 
+        y = max_phase,
+        color = well)) +
+  geom_point(size = 3) + 
+  ylim(-2.25,3.0) + xlim(200,500) +
+  labs(x = "Distance from shore (m)",
+       y = "Phase (radians)") +
+  theme_classic() + theme(aspect.ratio=1)
+
+ggarrange(amp_plot, phase_plot,
+          widths = c(2,2), heights = c(2,2),
+          ncol = 2, common.legend = TRUE, legend="bottom")
+
+```
+
+The amplitude of the tidal signal should decrease exponentially with decreasing distance
+from the shoreline. The lack of this trend suggests that different factors influence tidal signal propogation in wells MW1, MW2, MW3, than those in MW4.
